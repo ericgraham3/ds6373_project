@@ -17,11 +17,6 @@ library(lubridate)
 ```
 
 ```{r}
-library(quantmod)
-library(fredr)
-library(tidyverse)
-library(lubridate)
-
 fredr_set_key(Sys.getenv("FRED_API_KEY"))
 
 start_date = as.Date("1995-01-01")
