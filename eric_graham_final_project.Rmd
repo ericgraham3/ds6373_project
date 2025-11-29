@@ -10,4 +10,95 @@ knitr::opts_chunk$set(echo = TRUE)
 library(tswge)
 library(vars)
 library(nnfor)
+library(fredr)
+library(quantmod)
+library(tidyverse)
+library(lubridate)
 ```
+
+```{r}
+library(quantmod)
+library(fredr)
+library(tidyverse)
+library(lubridate)
+
+fredr_set_key(Sys.getenv("FRED_API_KEY"))
+
+start_date = as.Date("1995-01-01")
+end_date = Sys.Date()
+
+sp500 = getSymbols("^GSPC", from = start_date, to = end_date, auto.assign = FALSE)
+sp500_monthly = to.monthly(sp500, OHLC = FALSE)
+log_returns = diff(log(Cl(sp500_monthly)))
+log_returns = na.omit(log_returns)
+
+sp500_df = data.frame(
+  date = as.Date(index(log_returns)),
+  sp500_log_return = as.numeric(log_returns)
+)
+sp500_df$date = floor_date(sp500_df$date, "month") + months(1) - days(1)
+
+fred_series = c("T10Y2Y", "DGS10", "DBAA", "VIXCLS", "CPIAUCSL", "PCEPI", "UMCSENT", "ICSA", "T10YIE")
+
+fred_data = list()
+for (series in fred_series) {
+  fred_data[[series]] = fredr(
+    series_id = series,
+    observation_start = start_date,
+    observation_end = end_date
+  )
+}
+
+aggregate_to_monthly = function(df, value_col = "value") {
+  df %>%
+    mutate(month = floor_date(date, "month")) %>%
+    group_by(month) %>%
+    summarize(value = mean(get(value_col), na.rm = TRUE), .groups = "drop") %>%
+    mutate(date = month + months(1) - days(1)) %>%
+    select(date, value)
+}
+
+monthly_data = list()
+for (series in fred_series) {
+  agg = aggregate_to_monthly(fred_data[[series]])
+  names(agg)[2] = tolower(series)
+  monthly_data[[series]] = agg
+}
+
+predictors = monthly_data[[1]]
+for (i in 2:length(monthly_data)) {
+  predictors = full_join(predictors, monthly_data[[i]], by = "date")
+}
+
+predictors = predictors %>%
+  mutate(
+    credit_spread = dbaa - dgs10,
+    real_10yr = dgs10 - t10yie,
+    cpi_yoy = (cpiaucsl / lag(cpiaucsl, 12) - 1) * 100,
+    pce_yoy = (pcepi / lag(pcepi, 12) - 1) * 100
+  )
+
+ts_data = inner_join(sp500_df, predictors, by = "date") %>%
+  arrange(date) %>%
+  na.omit()
+
+str(ts_data)
+head(ts_data)
+tail(ts_data)
+dim(ts_data)
+```
+
+```{r}
+# plotts.wge(ts_data$sp500_log_return)
+# acf(ts_data$sp500_log_return)
+# parzen.wge(ts_data$sp500_log_return)
+aic5.wge(ts_data$sp500_log_return)
+fit = est.arma.wge(ts_data$sp500_log_return, p = 2, q = 2)
+
+plotts.sample.wge(fit$res)
+
+ljung.wge(fit$res)
+
+acf(fit$res)
+```
+
