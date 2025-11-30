@@ -14,7 +14,12 @@ library(fredr)
 library(quantmod)
 library(tidyverse)
 library(lubridate)
+library(lmtest)
 ```
+
+## Load Data
+
+### Response
 
 ```{r}
 fredr_set_key(Sys.getenv("FRED_API_KEY"))
@@ -32,18 +37,11 @@ sp500_df = data.frame(
   sp500_log_return = as.numeric(log_returns)
 )
 sp500_df$date = floor_date(sp500_df$date, "month") + months(1) - days(1)
+```
 
-fred_series = c("T10Y2Y", "DGS10", "DBAA", "VIXCLS", "CPIAUCSL", "PCEPI", "UMCSENT", "ICSA", "T10YIE")
+### Predictors
 
-fred_data = list()
-for (series in fred_series) {
-  fred_data[[series]] = fredr(
-    series_id = series,
-    observation_start = start_date,
-    observation_end = end_date
-  )
-}
-
+```{r}
 aggregate_to_monthly = function(df, value_col = "value") {
   df %>%
     mutate(month = floor_date(date, "month")) %>%
@@ -53,47 +51,94 @@ aggregate_to_monthly = function(df, value_col = "value") {
     select(date, value)
 }
 
-monthly_data = list()
-for (series in fred_series) {
-  agg = aggregate_to_monthly(fred_data[[series]])
-  names(agg)[2] = tolower(series)
-  monthly_data[[series]] = agg
-}
+term_spread = fredr(series_id = "T10Y2Y", observation_start = start_date, observation_end = end_date) %>%
+  aggregate_to_monthly() %>%
+  rename(term_spread = value)
 
-predictors = monthly_data[[1]]
-for (i in 2:length(monthly_data)) {
-  predictors = full_join(predictors, monthly_data[[i]], by = "date")
-}
+baa = fredr(series_id = "DBAA", observation_start = start_date, observation_end = end_date) %>%
+  aggregate_to_monthly() %>%
+  rename(baa = value)
 
-predictors = predictors %>%
-  mutate(
-    credit_spread = dbaa - dgs10,
-    real_10yr = dgs10 - t10yie,
-    cpi_yoy = (cpiaucsl / lag(cpiaucsl, 12) - 1) * 100,
-    pce_yoy = (pcepi / lag(pcepi, 12) - 1) * 100
-  )
+dgs10 = fredr(series_id = "DGS10", observation_start = start_date, observation_end = end_date) %>%
+  aggregate_to_monthly() %>%
+  rename(dgs10 = value)
 
-ts_data = inner_join(sp500_df, predictors, by = "date") %>%
+vix = fredr(series_id = "VIXCLS", observation_start = start_date, observation_end = end_date) %>%
+  aggregate_to_monthly() %>%
+  rename(vix = value)
+
+predictors = term_spread %>%
+  full_join(baa, by = "date") %>%
+  full_join(dgs10, by = "date") %>%
+  full_join(vix, by = "date") %>%
+  mutate(credit_spread = baa - dgs10) %>%
+  select(date, term_spread, credit_spread, vix)
+```
+
+### Combined DF
+
+```{r}
+df = inner_join(sp500_df, predictors, by = "date") %>%
   arrange(date) %>%
   na.omit()
 
-str(ts_data)
-head(ts_data)
-tail(ts_data)
-dim(ts_data)
+str(df)
+head(df)
+tail(df)
+dim(df)
+```
+
+### Missingness Check
+
+```{r}
+summary(df)
+
+colSums(is.na(df))
+
+sum(is.na(df))
+
+anyNA(df)
+
+df[!complete.cases(df), ]
+```
+
+## Stationarity
+
+```{r}
+plotts.sample.wge(df$sp500_log_return)
+plotts.sample.wge(df$term_spread)
+plotts.sample.wge(df$credit_spread)
+plotts.sample.wge(df$vix)
 ```
 
 ```{r}
-# plotts.wge(ts_data$sp500_log_return)
-# acf(ts_data$sp500_log_return)
-# parzen.wge(ts_data$sp500_log_return)
-aic5.wge(ts_data$sp500_log_return)
-fit = est.arma.wge(ts_data$sp500_log_return, p = 2, q = 2)
+diff_term = artrans.wge(df$term_spread, phi.tr = 1)
+plotts.sample.wge(diff_term)
+parzen.wge(diff_term)
+acf(diff_term)
+```
 
-plotts.sample.wge(fit$res)
+```{r}
+diff_credit = artrans.wge(df$credit_spread, phi.tr = 1)
+plotts.sample.wge(diff_credit)
+parzen.wge(diff_credit)
+acf(diff_credit)
+```
 
-ljung.wge(fit$res)
+```{r}
+diff_vix = artrans.wge(df$vix, phi.tr = 1)
+plotts.sample.wge(diff_vix)
+parzen.wge(diff_vix)
+acf(diff_vix)
+```
 
-acf(fit$res)
+```{r}
+df$diff_term = c(NA, diff_term)
+df$diff_credit = c(NA, diff_credit)
+df$diff_vix = c(NA, diff_vix)
+```
+
+```{r}
+head(df)
 ```
 
