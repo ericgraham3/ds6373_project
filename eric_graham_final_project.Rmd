@@ -79,8 +79,7 @@ predictors = term_spread %>%
 
 ```{r}
 df = inner_join(sp500_df, predictors, by = "date") %>%
-  arrange(date) %>%
-  na.omit()
+  arrange(date)
 
 str(df)
 head(df)
@@ -91,15 +90,14 @@ dim(df)
 ### Missingness Check
 
 ```{r}
-summary(df)
+expected_months = interval(min(df$date), max(df$date)) %/% months(1) + 1
+actual_months = nrow(df)
 
-colSums(is.na(df))
+cat("Expected months:", expected_months, "\n")
+cat("Actual months:", actual_months, "\n")
 
-sum(is.na(df))
-
-anyNA(df)
-
-df[!complete.cases(df), ]
+cat("NA count by column:\n")
+print(colSums(is.na(df)))
 ```
 
 ## Stationarity
@@ -136,9 +134,233 @@ acf(diff_vix)
 df$diff_term = c(NA, diff_term)
 df$diff_credit = c(NA, diff_credit)
 df$diff_vix = c(NA, diff_vix)
+head(df)
+```
+
+## Baseline ARMA
+
+```{r}
+aic5.wge(df$sp500_log_return)
+```
+
+Not surprising an ARMA(0,0) is best, because the log returns of the S&P500 are essentially white noise (as shown in the plots above). This is due to market efficiency. The other simple candidate models found by AIC are ARMA(1,1) and ARMA(0,1). 
+
+```{r}
+# ARMA + residuals
+arma_1_1 = est.arma.wge(df$sp500_log_return, p = 1, q = 1)
+arma_0_1 = est.arma.wge(df$sp500_log_return, p = 0, q = 1)
+
+plotts.sample.wge(arma_1_1$res, arlimits = TRUE)
+ljung.wge(arma_1_1$res, p = 1, q = 1)
+ljung.wge(arma_1_1$res, p = 1, q = 1, K = 48)
+
+plotts.sample.wge(arma_0_1$res, arlimits = TRUE)
+ljung.wge(arma_0_1$res, p = 0, q = 1)
+ljung.wge(arma_0_1$res, p = 0, q = 1, K = 48)
+
+# forecast / ASE
+n = length(df$sp500_log_return)
+n_train = n - 24
+
+fore_1_1_short = fore.arma.wge(df$sp500_log_return[1:n_train], 
+                                phi = arma_1_1$phi, 
+                                theta = arma_1_1$theta, 
+                                n.ahead = 12)
+ASE_1_1_short = mean((df$sp500_log_return[(n_train + 1):(n_train + 12)] - fore_1_1_short$f)^2)
+
+fore_1_1_long = fore.arma.wge(df$sp500_log_return[1:n_train], 
+                               phi = arma_1_1$phi, 
+                               theta = arma_1_1$theta, 
+                               n.ahead = 24)
+ASE_1_1_long = mean((df$sp500_log_return[(n_train + 1):n] - fore_1_1_long$f)^2)
+
+fore_0_1_short = fore.arma.wge(df$sp500_log_return[1:n_train], 
+                                phi = arma_0_1$phi, 
+                                theta = arma_0_1$theta, 
+                                n.ahead = 12)
+ASE_0_1_short = mean((df$sp500_log_return[(n_train + 1):(n_train + 12)] - fore_0_1_short$f)^2)
+
+fore_0_1_long = fore.arma.wge(df$sp500_log_return[1:n_train], 
+                               phi = arma_0_1$phi, 
+                               theta = arma_0_1$theta, 
+                               n.ahead = 24)
+ASE_0_1_long = mean((df$sp500_log_return[(n_train + 1):n] - fore_0_1_long$f)^2)
+
+# rwRMSE
+rw_1_1_short = roll.win.rmse.wge(df$sp500_log_return, 
+                                  horizon = 12, 
+                                  s = 0, 
+                                  d = 0, 
+                                  phi = arma_1_1$phi, 
+                                  theta = arma_1_1$theta)
+
+rw_1_1_long = roll.win.rmse.wge(df$sp500_log_return, 
+                                 horizon = 24, 
+                                 s = 0, 
+                                 d = 0, 
+                                 phi = arma_1_1$phi, 
+                                 theta = arma_1_1$theta)
+
+rw_0_1_short = roll.win.rmse.wge(df$sp500_log_return, 
+                                  horizon = 12, 
+                                  s = 0, 
+                                  d = 0, 
+                                  phi = arma_0_1$phi, 
+                                  theta = arma_0_1$theta)
+
+rw_0_1_long = roll.win.rmse.wge(df$sp500_log_return, 
+                                 horizon = 24, 
+                                 s = 0, 
+                                 d = 0, 
+                                 phi = arma_0_1$phi, 
+                                 theta = arma_0_1$theta)
+
+
+cat("ARMA(1,1) Results:\n")
+cat("12 month ASE:", ASE_1_1_short, "\n")
+cat("24 month ASE:", ASE_1_1_long, "\n")
+cat("12 month rwRMSE:", rw_1_1_short$rwRMSE, "\n")
+cat("24 month rwRMSE:", rw_1_1_long$rwRMSE, "\n\n")
+
+cat("ARMA(0,1) Results:\n")
+cat("12 month ASE:", ASE_0_1_short, "\n")
+cat("24 month ASE:", ASE_0_1_long, "\n")
+cat("12 month rwRMSE:", rw_0_1_short$rwRMSE, "\n")
+cat("24 month rwRMSE:", rw_0_1_long$rwRMSE, "\n")
+```
+
+## Multivariate Approach
+
+It's needed! This question isn't univariate!
+
+```{r}
+str(df)
 ```
 
 ```{r}
-head(df)
+df_clean = df %>% na.omit() # need to remove first row of differenced data
+
+mlr_fit = lm(sp500_log_return ~ diff_term + diff_credit + diff_vix, 
+             data = df_clean)
+summary(mlr_fit)
+
+phi = aic.wge(mlr_fit$residuals, p = 0:8, q = 0)
+phi$p
+
+mlr_arima = arima(df_clean$sp500_log_return, order = c(phi$p, 0, 0), xreg = cbind(df_clean$diff_term, df_clean$diff_credit, df_clean$diff_vix))
+mlr_arima
+AIC(mlr_arima)
+
+acf(mlr_arima$residuals)
+ljung.wge(mlr_arima$residuals, p = phi$p, q = 0, K = 24)
+ljung.wge(mlr_arima$residuals, p = phi$p, q = 0, K = 48)
+```
+
+```{r}
+mlr_per_obs_aic = mlr_arima$aic / nrow(df_clean)
+mlr_per_obs_aic
+```
+
+## VAR Model
+
+```{r}
+X = cbind(df_clean$sp500_log_return, 
+          df_clean$diff_term, 
+          df_clean$diff_credit, 
+          df_clean$diff_vix)
+
+VARselect(X, lag.max = 10, type = "const")
+
+var_fit = VAR(X, type = "const", lag.max = 10)
+var_fit
+AIC(var_fit)
+
+n = nrow(df_clean)
+n_train = n - 24
+
+X_train = X[1:n_train, ]
+var_train = VAR(X_train, type = "const", lag.max = 10)
+
+preds_short = predict(var_train, n.ahead = 12)
+preds_long = predict(var_train, n.ahead = 24)
+
+forecasts_short = preds_short$fcst$y1[, 1]
+forecasts_long = preds_long$fcst$y1[, 1]
+
+ASE_var_short = mean((df_clean$sp500_log_return[(n_train + 1):(n_train + 12)] - forecasts_short)^2)
+ASE_var_long = mean((df_clean$sp500_log_return[(n_train + 1):n] - forecasts_long)^2)
+
+cat("VAR - 12 month ASE:", ASE_var_short, "\n")
+cat("VAR - 24 month ASE:", ASE_var_long, "\n")
+```
+
+## Neural Network Model
+
+```{r}
+n = nrow(df_clean)
+n_train = n - 24
+
+train_ts = ts(df_clean$sp500_log_return[1:n_train])
+test_ts = ts(df_clean$sp500_log_return[(n_train + 1):n])
+
+xreg_df = data.frame(
+  diff_term = ts(df_clean$diff_term),
+  diff_credit = ts(df_clean$diff_credit),
+  diff_vix = ts(df_clean$diff_vix)
+)
+
+set.seed(2)
+fit.mlp = mlp(train_ts, xreg = xreg_df, reps = 50, comb = "mean")
+fit.mlp
+
+plot(fit.mlp)
+
+fore.mlp.short = forecast(fit.mlp, h = 12, xreg = xreg_df)
+ASE_mlp_short = mean((df_clean$sp500_log_return[(n_train + 1):(n_train + 12)] - fore.mlp.short$mean)^2)
+
+fore.mlp.long = forecast(fit.mlp, h = 24, xreg = xreg_df)
+ASE_mlp_long = mean((df_clean$sp500_log_return[(n_train + 1):n] - fore.mlp.long$mean)^2)
+
+cat("MLP - 12 month ASE:", ASE_mlp_short, "\n")
+cat("MLP - 24 month ASE:", ASE_mlp_long, "\n")
+
+plot(fore.mlp.short)
+plot(fore.mlp.long)
+```
+
+## Ensemble Model
+
+```{r}
+ensemble_short = (forecasts_short + fore.mlp.short$mean) / 2
+ensemble_long = (forecasts_long + fore.mlp.long$mean) / 2
+
+ASE_ensemble_short = mean((df_clean$sp500_log_return[(n_train + 1):(n_train + 12)] - ensemble_short)^2)
+ASE_ensemble_long = mean((df_clean$sp500_log_return[(n_train + 1):n] - ensemble_long)^2)
+
+cat("Ensemble Results:\n")
+cat("12 month ASE:", ASE_ensemble_short, "\n")
+cat("24 month ASE:", ASE_ensemble_long, "\n\n")
+
+cat("Model Comparison:\n")
+cat("VAR - 12 month ASE:", ASE_var_short, "\n")
+cat("MLP - 12 month ASE:", ASE_mlp_short, "\n")
+cat("Ensemble - 12 month ASE:", ASE_ensemble_short, "\n\n")
+
+cat("VAR - 24 month ASE:", ASE_var_long, "\n")
+cat("MLP - 24 month ASE:", ASE_mlp_long, "\n")
+cat("Ensemble - 24 month ASE:", ASE_ensemble_long, "\n")
+```
+
+```{r}
+plot(seq(1, n), df_clean$sp500_log_return, type = "l",
+     xlim = c(n_train - 50, n + 5),
+     main = "Ensemble Forecast: VAR + MLP",
+     xlab = "Time", ylab = "S&P 500 Log Returns")
+lines(seq(n_train + 1, n_train + 12), ensemble_short, col = "green", lwd = 2)
+lines(seq(n_train + 1, n), ensemble_long, col = "darkgreen", lwd = 2, lty = 2)
+legend("topright", 
+       legend = c("Actual", "12-month Ensemble", "24-month Ensemble"),
+       col = c("black", "green", "darkgreen"),
+       lty = c(1, 1, 2), lwd = c(1, 2, 2))
 ```
 
